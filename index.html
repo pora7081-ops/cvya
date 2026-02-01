@@ -95,7 +95,7 @@
             <div class="mb-10 text-center">
                 <div class="w-20 h-20 bg-yellow-400 rounded-[30px] flex items-center justify-center text-black font-black text-4xl rotate-6 mx-auto mb-4 shadow-[0_0_30px_rgba(255,215,0,0.6)]">С</div>
                 <h1 class="text-3xl font-black uppercase tracking-[0.2em] italic">Связуха</h1>
-                <p id="auth-status" class="text-yellow-400 text-[10px] font-bold uppercase tracking-widest mt-2">Подключение к сети...</p>
+                <p id="auth-status" class="text-yellow-400 text-[10px] font-bold uppercase tracking-widest mt-2">Инициализация протоколов...</p>
             </div>
 
             <div id="reg-form" class="w-full space-y-6 hidden">
@@ -168,63 +168,67 @@
             unsubscribeMessages: null
         };
 
-        // --- AUTH & INIT ---
+        // --- AUTH & INIT (ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ЗАВИСАНИЯ) ---
         const init = async () => {
+            const statusLabel = document.getElementById('auth-status');
             try {
-                // Rule 3: Auth Before Queries
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-
-                // Ждем изменения состояния авторизации один раз для инициализации
-                const user = await new Promise((resolve) => {
-                    const unsubscribe = onAuthStateChanged(auth, (u) => {
-                        unsubscribe();
-                        resolve(u);
+                statusLabel.innerText = "ВХОД В СИСТЕМУ...";
+                
+                // Обертка для авторизации с промисом, чтобы гарантированно дождаться UID
+                const user = await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error("Timeout")), 10000);
+                    
+                    const unsub = onAuthStateChanged(auth, (u) => {
+                        if (u) {
+                            clearTimeout(timeout);
+                            unsub();
+                            resolve(u);
+                        }
                     });
+
+                    // Запуск входа
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        signInWithCustomToken(auth, __initial_auth_token).catch(reject);
+                    } else {
+                        signInAnonymously(auth).catch(reject);
+                    }
                 });
 
-                if (user) {
-                    state.user = user;
-                    await checkProfile();
-                    
-                    // Устанавливаем постоянный слушатель для обновления стейта
-                    onAuthStateChanged(auth, (u) => {
-                        state.user = u;
-                    });
-                } else {
-                    document.getElementById('auth-status').innerText = "ОШИБКА АВТОРИЗАЦИИ";
-                }
+                state.user = user;
+                statusLabel.innerText = "ПРОВЕРКА ПРОФИЛЯ...";
+                await checkProfile();
+
             } catch (e) {
-                console.error(e);
-                document.getElementById('auth-status').innerText = "ОШИБКА СЕТИ";
+                console.error("Init error:", e);
+                statusLabel.innerText = "СЕТЬ НЕДОСТУПНА. ПЕРЕЗАГРУЗИ";
             }
         };
 
         const checkProfile = async () => {
             if (!state.user) return;
             try {
-                // Rule 1: Strict Paths
-                const pDoc = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'));
+                // Прямой путь к данным профиля
+                const profileRef = doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data');
+                const pDoc = await getDoc(profileRef);
+                
                 if (pDoc.exists()) {
                     state.profile = pDoc.data();
                     enterApp();
                 } else {
-                    document.getElementById('auth-status').innerText = "ЖДЕМ ТЕБЯ";
+                    document.getElementById('auth-status').innerText = "КТО ТЫ, ВОИН?";
                     document.getElementById('reg-form').classList.remove('hidden');
                 }
             } catch (e) {
-                console.error(e);
-                document.getElementById('auth-status').innerText = "ОШИБКА ДОСТУПА";
+                console.error("Profile check error:", e);
+                document.getElementById('auth-status').innerText = "ОШИБКА БАЗЫ ДАННЫХ";
             }
         };
 
         window.handleRegister = async () => {
-            const name = document.getElementById('reg-username').value.trim();
-            if (name.length < 3) return showToast("НИК КОРОТКИЙ");
-            if (!state.user) return showToast("НЕТ СЕТИ");
+            const nameInput = document.getElementById('reg-username');
+            const name = nameInput.value.trim();
+            if (name.length < 3) return showToast("НИК СЛИШКОМ КОРОТКИЙ");
+            if (!state.user) return showToast("ОШИБКА АВТОРИЗАЦИИ");
 
             const userData = {
                 uid: state.user.uid,
@@ -235,12 +239,13 @@
             };
 
             try {
+                // Сохраняем в личный профиль и в публичный список
                 await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), userData);
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), userData);
                 state.profile = userData;
                 enterApp();
             } catch (e) {
-                showToast("ОШИБКА СОХРАНЕНИЯ");
+                showToast("НЕ УДАЛОСЬ СОХРАНИТЬ");
             }
         };
 
@@ -252,7 +257,7 @@
             switchTab('chats');
         };
 
-        // --- UI TABS ---
+        // --- ИНТЕРФЕЙС И ВКЛАДКИ ---
         window.switchTab = (tab) => {
             state.currentTab = tab;
             if (state.unsubscribeMessages) state.unsubscribeMessages();
@@ -269,18 +274,19 @@
 
         const renderChats = async () => {
             const content = document.getElementById('main-content');
-            const list = [{ uid: 'ai-bot', username: "СВЯЗНОЙ ИИ", avatar: "🤖", status: "В сети" }, ...state.friends];
+            const list = [{ uid: 'ai-bot', username: "СВЯЗНОЙ ИИ", avatar: "🤖", status: "Твой цифровой бро" }, ...state.friends];
             
-            content.innerHTML = `<div class="space-y-4 animate-in fade-in">
+            content.innerHTML = `<div class="space-y-4 animate-in fade-in duration-300">
                 ${list.map(f => `
                     <div onclick="openChat('${f.uid}')" class="flex items-center gap-4 p-4 hover:bg-yellow-400/5 rounded-2xl cursor-pointer border border-transparent hover:border-white/10 active:scale-95 transition-all">
                         <div class="w-14 h-14 rounded-xl bg-yellow-400/10 overflow-hidden flex items-center justify-center text-2xl border border-yellow-400/20">
                             ${(f.avatar?.startsWith('http') || f.avatar?.startsWith('data:')) ? `<img src="${f.avatar}" class="w-full h-full object-cover">` : f.avatar}
                         </div>
                         <div class="flex-1">
-                            <h4 class="font-black text-yellow-400 uppercase italic">${f.username}</h4>
-                            <p class="text-[10px] opacity-40 truncate">${f.status}</p>
+                            <h4 class="font-black text-yellow-400 uppercase italic tracking-wider">${f.username}</h4>
+                            <p class="text-[10px] opacity-40 truncate font-bold uppercase">${f.status}</p>
                         </div>
+                        <i class="fa-solid fa-chevron-right text-[10px] opacity-20"></i>
                     </div>
                 `).join('')}
             </div>`;
@@ -290,7 +296,7 @@
             const content = document.getElementById('main-content');
             content.innerHTML = `<div class="space-y-8 animate-in slide-in-from-bottom-4">
                 <div class="bg-yellow-400/10 p-6 rounded-3xl border border-yellow-400/20">
-                    <p class="text-[10px] font-black uppercase text-yellow-400 mb-2 italic">Твой код связи</p>
+                    <p class="text-[10px] font-black uppercase text-yellow-400 mb-2 italic">Твой уникальный код</p>
                     <div class="flex items-center justify-between">
                         <span class="text-2xl font-mono font-black tracking-widest">${state.profile.connectionId}</span>
                         <button onclick="copyId()" class="bg-yellow-400 text-black px-4 py-2 rounded-xl text-[10px] font-black uppercase">Копия</button>
@@ -300,7 +306,7 @@
                     <p class="text-[10px] font-black uppercase opacity-40 ml-4 italic text-white">Добавить по коду</p>
                     <div class="flex gap-2">
                         <input type="text" id="friend-input" placeholder="SV-XXXX" class="flex-1 bg-white/5 border border-white/10 rounded-2xl p-4 yellow-glow uppercase font-black text-white">
-                        <button onclick="addFriend()" class="bg-yellow-400 text-black px-6 rounded-2xl"><i class="fa-solid fa-plus"></i></button>
+                        <button onclick="addFriend()" class="bg-yellow-400 text-black px-6 rounded-2xl tap-effect"><i class="fa-solid fa-plus"></i></button>
                     </div>
                 </div>
             </div>`;
@@ -321,17 +327,18 @@
                 </div>
                 <div class="w-full space-y-4">
                     <div class="space-y-1">
-                        <label class="text-[9px] uppercase font-black opacity-30 ml-4 italic text-white">Статус</label>
-                        <textarea id="p-status" class="w-full bg-white/5 border border-white/10 rounded-2xl p-4 yellow-glow h-20 resize-none text-white">${state.profile.status}</textarea>
+                        <label class="text-[9px] uppercase font-black opacity-30 ml-4 italic text-white">Твой статус</label>
+                        <textarea id="p-status" class="w-full bg-white/5 border border-white/10 rounded-2xl p-4 yellow-glow h-20 resize-none text-white font-bold">${state.profile.status}</textarea>
                     </div>
-                    <button onclick="saveProfile()" class="w-full bg-yellow-400 text-black font-black py-5 rounded-2xl uppercase italic">Сохранить тюнинг</button>
+                    <button onclick="saveProfile()" class="w-full bg-yellow-400 text-black font-black py-5 rounded-2xl uppercase italic shadow-lg tap-effect">Обновить базу</button>
                 </div>
             </div>`;
         };
 
-        // --- ACTIONS ---
+        // --- ДЕЙСТВИЯ ---
         window.previewFile = (e) => {
             const file = e.target.files[0];
+            if (!file) return;
             const reader = new FileReader();
             reader.onload = (res) => {
                 state.tempAvatar = res.target.result;
@@ -343,7 +350,7 @@
 
         window.saveProfile = async () => {
             const statusInput = document.getElementById('p-status');
-            const status = statusInput ? statusInput.value : state.profile.status;
+            const status = statusInput ? statusInput.value.trim() : state.profile.status;
             const updated = { ...state.profile, status, avatar: state.tempAvatar || state.profile.avatar };
             
             try {
@@ -351,83 +358,96 @@
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), updated);
                 state.profile = updated;
                 state.tempAvatar = null;
-                showToast("ГОТОВО!");
+                showToast("ПРОФИЛЬ ОБНОВЛЕН");
             } catch (e) {
-                showToast("ОШИБКА");
+                showToast("ОШИБКА СОХРАНЕНИЯ");
             }
         };
 
         const loadFriends = async () => {
             if (!state.user) return;
-            const fSnap = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'));
-            if (fSnap.exists()) {
-                const list = fSnap.data().list || [];
-                const fullList = [];
-                for (let uid of list) {
-                    const u = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', uid));
-                    if (u.exists()) fullList.push(u.data());
+            try {
+                const fSnap = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'));
+                if (fSnap.exists()) {
+                    const list = fSnap.data().list || [];
+                    const fullList = [];
+                    for (let uid of list) {
+                        const u = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', uid));
+                        if (u.exists()) fullList.push(u.data());
+                    }
+                    state.friends = fullList;
+                    if (state.currentTab === 'chats') renderChats();
                 }
-                state.friends = fullList;
-                if (state.currentTab === 'chats') renderChats();
-            }
+            } catch (e) { console.error("Load friends error:", e); }
         };
 
         window.addFriend = async () => {
             const input = document.getElementById('friend-input');
             const code = input ? input.value.trim().toUpperCase() : "";
-            const allUsers = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
-            let target = null;
-            allUsers.forEach(d => { if(d.data().connectionId === code) target = d.data(); });
+            if (!code) return;
+            
+            try {
+                const allUsers = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
+                let target = null;
+                allUsers.forEach(d => { if(d.data().connectionId === code) target = d.data(); });
 
-            if (target && target.uid !== state.user.uid) {
-                const listDoc = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'));
-                const list = listDoc.exists() ? listDoc.data().list || [] : [];
-                if (!list.includes(target.uid)) {
-                    list.push(target.uid);
-                    await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'), { list });
-                    await loadFriends();
-                    showToast("ДОБАВЛЕН!");
-                } else showToast("УЖЕ В ГЭНГЕ");
-            } else showToast("НЕ НАЙДЕН");
+                if (target && target.uid !== state.user.uid) {
+                    const listDoc = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'));
+                    const list = listDoc.exists() ? listDoc.data().list || [] : [];
+                    if (!list.includes(target.uid)) {
+                        list.push(target.uid);
+                        await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'), { list });
+                        await loadFriends();
+                        showToast("КОНТАКТ ДОБАВЛЕН");
+                        input.value = "";
+                    } else showToast("УЖЕ В СПИСКЕ");
+                } else showToast("КОД НЕВЕРЕН");
+            } catch (e) { showToast("ОШИБКА ПОИСКА"); }
         };
 
-        // --- CHAT LOGIC ---
+        // --- ЧАТ И СООБЩЕНИЯ ---
         window.openChat = async (uid) => {
             state.activeChat = uid;
             const friend = uid === 'ai-bot' ? { username: "СВЯЗНОЙ ИИ" } : state.friends.find(f => f.uid === uid);
-            
+            if (!friend) return;
+
             const content = document.getElementById('main-content');
             content.innerHTML = `<div class="flex flex-col h-full animate-in fade-in">
                 <div class="flex items-center gap-4 mb-4 pb-4 border-b border-white/10">
-                    <button onclick="switchTab('chats')" class="opacity-40"><i class="fa-solid fa-arrow-left"></i></button>
-                    <span class="font-black text-yellow-400 uppercase italic">${friend.username}</span>
+                    <button onclick="switchTab('chats')" class="w-10 h-10 flex items-center justify-center bg-white/5 rounded-xl"><i class="fa-solid fa-arrow-left"></i></button>
+                    <div class="flex flex-col">
+                        <span class="font-black text-yellow-400 uppercase italic leading-none">${friend.username}</span>
+                        <span class="text-[8px] opacity-40 font-bold uppercase mt-1">Защищенный канал</span>
+                    </div>
                 </div>
                 <div id="msg-box" class="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar"></div>
                 <div class="pt-4 flex items-center gap-2">
-                    <button onclick="toggleStickers()" class="text-yellow-400 text-xl"><i class="fa-solid fa-face-smile"></i></button>
-                    <input type="text" id="m-input" placeholder="Че как?.." class="flex-1 bg-white/5 border-none rounded-2xl p-4 text-sm yellow-glow text-white">
-                    <button onclick="sendMsg()" class="w-12 h-12 bg-yellow-400 text-black rounded-2xl"><i class="fa-solid fa-paper-plane"></i></button>
+                    <button onclick="toggleStickers()" class="w-12 h-12 flex items-center justify-center text-yellow-400 text-xl hover:scale-110 transition-transform"><i class="fa-solid fa-face-smile"></i></button>
+                    <input type="text" id="m-input" placeholder="Напиши что-нибудь..." class="flex-1 bg-white/5 border-none rounded-2xl p-4 text-sm yellow-glow text-white font-bold" onkeypress="if(event.key==='Enter') sendMsg()">
+                    <button onclick="sendMsg()" class="w-12 h-12 bg-yellow-400 text-black rounded-2xl tap-effect shadow-lg"><i class="fa-solid fa-paper-plane"></i></button>
                 </div>
             </div>`;
 
             if (uid !== 'ai-bot') {
                 const chatID = [state.user.uid, uid].sort().join('_');
                 const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'chats', chatID, 'messages'));
+                
                 state.unsubscribeMessages = onSnapshot(q, (snap) => {
                     const box = document.getElementById('msg-box');
                     if (!box) return;
                     const msgs = [];
                     snap.forEach(d => msgs.push(d.data()));
                     msgs.sort((a,b) => (a.at?.seconds || 0) - (b.at?.seconds || 0));
+                    
                     box.innerHTML = msgs.map(m => `
-                        <div class="message-liquid p-4 text-xs font-bold max-w-[80%] ${m.from === state.user.uid ? 'mine ml-auto' : ''} text-white">
+                        <div class="message-liquid p-4 text-xs font-bold max-w-[85%] ${m.from === state.user.uid ? 'mine ml-auto' : ''} text-white shadow-sm">
                             ${m.text}
                         </div>
                     `).join('');
                     box.scrollTop = box.scrollHeight;
-                }, (err) => console.error("Snapshot error:", err));
+                }, (err) => console.error("Chat sync error:", err));
             } else {
-                document.getElementById('msg-box').innerHTML = `<div class="message-liquid p-4 text-xs font-medium text-white">Йо! Я на связи. Спрашивай че хочешь.</div>`;
+                document.getElementById('msg-box').innerHTML = `<div class="message-liquid p-4 text-xs font-bold text-white border border-yellow-400/20">Йо! Я на связи. Спрашивай что угодно, помогу раскидать по фактам.</div>`;
             }
         };
 
@@ -442,16 +462,19 @@
                 const box = document.getElementById('msg-box');
                 box.innerHTML += `<div class="message-liquid mine p-4 text-xs font-bold ml-auto text-white">${text}</div>`;
                 box.scrollTop = box.scrollHeight;
+                
                 const reply = await askAI(text);
                 if (box) {
-                    box.innerHTML += `<div class="message-liquid p-4 text-xs font-medium text-white border border-yellow-400/20">${reply}</div>`;
+                    box.innerHTML += `<div class="message-liquid p-4 text-xs font-bold text-white border border-yellow-400/20 shadow-xl bg-yellow-400/5">${reply}</div>`;
                     box.scrollTop = box.scrollHeight;
                 }
             } else {
                 const chatID = [state.user.uid, state.activeChat].sort().join('_');
-                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'chats', chatID, 'messages'), {
-                    text, from: state.user.uid, at: serverTimestamp()
-                });
+                try {
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'chats', chatID, 'messages'), {
+                        text, from: state.user.uid, at: serverTimestamp()
+                    });
+                } catch (e) { showToast("ОШИБКА ОТПРАВКИ"); }
             }
         };
 
@@ -459,20 +482,25 @@
             try {
                 const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
                     method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({ contents:[{parts:[{text:q}]}], systemInstruction:{parts:[{text:"Ты Связной. Твой стиль: сленг, харизма, краткость."}]} })
+                    body: JSON.stringify({ 
+                        contents:[{parts:[{text:q}]}], 
+                        systemInstruction:{parts:[{text:"Ты — Связной. Твой стиль: уличный сленг, харизма, уверенность, краткость. Обращайся к пользователю на ты."}]} 
+                    })
                 });
                 const d = await r.json();
-                return d.candidates[0].content.parts[0].text;
-            } catch { return "Связь прервалась..."; }
+                return d.candidates?.[0]?.content?.parts?.[0]?.text || "База данных ИИ временно недоступна.";
+            } catch { return "Связь с сервером ИИ прервалась. Попробуй позже."; }
         }
 
         window.toggleStickers = () => {
             const p = document.getElementById('sticker-panel');
             if (!p) return;
             p.classList.toggle('hidden');
-            document.getElementById('sticker-grid').innerHTML = state.stickers.map(s => `
-                <div onclick="sendSticker('${s}')" class="text-3xl p-2 hover:bg-yellow-400/20 rounded-xl cursor-pointer text-center">${s}</div>
-            `).join('');
+            if (!p.classList.contains('hidden')) {
+                document.getElementById('sticker-grid').innerHTML = state.stickers.map(s => `
+                    <div onclick="sendSticker('${s}')" class="text-3xl p-3 hover:bg-yellow-400/20 rounded-2xl cursor-pointer text-center transition-transform active:scale-125">${s}</div>
+                `).join('');
+            }
         };
 
         window.sendSticker = (s) => { 
@@ -485,18 +513,23 @@
         window.copyId = () => { 
             if (state.profile) {
                 navigator.clipboard.writeText(state.profile.connectionId); 
-                showToast("КОПИЯ!"); 
+                showToast("СКОПИРОВАНО"); 
             }
         };
 
         function showToast(m) {
             const t = document.createElement('div');
-            t.className = "fixed bottom-32 left-1/2 -translate-x-1/2 bg-yellow-400 text-black px-6 py-3 rounded-2xl font-black text-[10px] uppercase italic z-[3000]";
+            t.className = "fixed bottom-32 left-1/2 -translate-x-1/2 bg-yellow-400 text-black px-6 py-3 rounded-2xl font-black text-[10px] uppercase italic z-[3000] shadow-2xl animate-bounce";
             t.innerText = m;
             document.body.appendChild(t);
-            setTimeout(() => t.remove(), 2000);
+            setTimeout(() => {
+                t.style.opacity = '0';
+                t.style.transition = '0.5s';
+                setTimeout(() => t.remove(), 500);
+            }, 2000);
         }
 
+        // Запуск
         init();
     </script>
 </body>
