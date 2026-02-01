@@ -103,7 +103,7 @@
 <body>
 
     <div id="app-wrapper">
-        <!-- ЭКРАН РЕГИСТРАЦИИ -->
+        <!-- REGISTRATION SCREEN -->
         <div id="auth-screen" class="auth-screen">
             <div class="mb-10 text-center">
                 <div class="w-20 h-20 bg-yellow-400 rounded-[30px] flex items-center justify-center text-black font-black text-4xl rotate-6 mx-auto mb-4 shadow-[0_0_30px_rgba(255,215,0,0.6)]">С</div>
@@ -126,7 +126,7 @@
             </div>
         </div>
 
-        <!-- ГЛАВНЫЙ КОНТЕЙНЕР ПРИЛОЖЕНИЯ -->
+        <!-- MAIN APP CONTAINER -->
         <div id="app" class="w-full h-full liquid-glass flex flex-col relative overflow-hidden">
             <header class="p-6 flex justify-between items-center border-b border-white/10 shrink-0">
                 <div class="flex items-center gap-3">
@@ -160,7 +160,7 @@
                 </button>
             </nav>
 
-            <!-- Панель стикеров -->
+            <!-- Sticker Panel -->
             <div id="sticker-panel" class="hidden absolute bottom-24 left-4 right-4 liquid-glass p-5 h-72 overflow-y-auto z-50 border-yellow-400/40">
                 <h3 class="text-[10px] font-black text-yellow-400 mb-4 uppercase italic">Пакет «Заряженный»</h3>
                 <div class="grid grid-cols-4 gap-4" id="sticker-grid"></div>
@@ -196,17 +196,22 @@
         };
 
         const checkEntry = async (user) => {
-            const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'data');
-            const profileDoc = await getDoc(profileRef);
-            
-            if (profileDoc.exists()) {
-                state.currentUserData = profileDoc.data();
-                document.getElementById('header-username').innerText = state.currentUserData.username;
-                document.getElementById('auth-screen').classList.add('hidden');
-                await loadFriendsList();
-                switchTab('chats');
-            } else {
-                document.getElementById('auth-screen').classList.remove('hidden');
+            try {
+                const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'data');
+                const profileDoc = await getDoc(profileRef);
+                
+                if (profileDoc.exists()) {
+                    state.currentUserData = profileDoc.data();
+                    document.getElementById('header-username').innerText = state.currentUserData.username;
+                    document.getElementById('auth-screen').classList.add('hidden');
+                    await loadFriendsList();
+                    switchTab('chats');
+                } else {
+                    document.getElementById('auth-screen').classList.remove('hidden');
+                }
+            } catch (err) {
+                console.error("Entry check failed", err);
+                showToast("ОШИБКА ДОСТУПА");
             }
         };
 
@@ -218,16 +223,24 @@
         });
 
         const initAuth = async () => {
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                await signInWithCustomToken(auth, __initial_auth_token);
-            } else {
-                await signInAnonymously(auth);
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) {
+                showToast("СЕТЬ НЕДОСТУПНА");
             }
         };
         initAuth();
 
         window.handleRegister = async () => {
-            if (!state.user) return showToast("СЕТЬ ГРУЗИТСЯ...");
+            if (!state.user) {
+                showToast("ЖДЕМ ПОДКЛЮЧЕНИЯ...");
+                return;
+            }
+            
             const input = document.getElementById('reg-username');
             const status = document.getElementById('reg-status');
             const btn = document.getElementById('btn-register');
@@ -259,18 +272,22 @@
                     connectionId: "SV-" + Math.random().toString(36).substring(2, 6).toUpperCase()
                 };
 
+                // Save to private and public paths as per Rule 1
                 await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), userData);
                 await setDoc(globalRef, { uid: state.user.uid });
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), userData);
 
+                showToast("ДОБРО ПОЖАЛОВАТЬ!");
                 await checkEntry(state.user);
             } catch (e) {
+                console.error(e);
                 status.innerText = "ОШИБКА БАЗЫ";
                 btn.disabled = false;
             }
         };
 
         const loadFriendsList = async () => {
+            if (!state.user) return;
             const friendsRef = doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends');
             const snap = await getDoc(friendsRef);
             state.userFriendsList = snap.exists() ? snap.data().list || [] : [];
@@ -280,8 +297,10 @@
         const refreshFriendsData = async () => {
             const allUsers = [{ uid: 'ai-bot', username: "СВЯЗНОЙ ИИ", avatar: "🤖", status: "Взламывает реальность" }];
             for (const fUid of state.userFriendsList) {
-                const uDoc = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', fUid));
-                if (uDoc.exists()) allUsers.push(uDoc.data());
+                try {
+                    const uDoc = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', fUid));
+                    if (uDoc.exists()) allUsers.push(uDoc.data());
+                } catch (e) {}
             }
             state.friends = allUsers;
             if (state.currentTab === 'chats') renderChats();
@@ -299,8 +318,14 @@
             let target = null;
             snap.forEach(d => { if(d.data().connectionId === code) target = d.data(); });
 
-            if (!target || target.uid === state.user.uid) return showToast("ОШИБКА КОДА");
-            if (state.userFriendsList.includes(target.uid)) return showToast("УЖЕ В ГЭНГЕ");
+            if (!target || target.uid === state.user.uid) {
+                showToast("ОШИБКА КОДА");
+                return;
+            }
+            if (state.userFriendsList.includes(target.uid)) {
+                showToast("УЖЕ В ГЭНГЕ");
+                return;
+            }
 
             state.userFriendsList.push(target.uid);
             await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'), { list: state.userFriendsList });
@@ -332,7 +357,7 @@
                     ${state.friends.map(friend => `
                         <div onclick="openChat('${friend.uid}')" class="flex items-center gap-4 p-4 hover:bg-yellow-400/5 rounded-[24px] cursor-pointer transition-all border border-transparent hover:border-yellow-400/20 active:scale-95">
                             <div class="w-16 h-16 rounded-2xl bg-yellow-400/10 border border-yellow-400/20 flex items-center justify-center text-3xl overflow-hidden shrink-0">
-                                ${friend.avatar.startsWith('http') || friend.avatar.startsWith('data:') ? `<img src="${friend.avatar}" class="w-full h-full object-cover">` : friend.avatar}
+                                ${friend.avatar && (friend.avatar.startsWith('http') || friend.avatar.startsWith('data:')) ? `<img src="${friend.avatar}" class="w-full h-full object-cover">` : friend.avatar || '👤'}
                             </div>
                             <div class="flex-1 min-w-0">
                                 <h4 class="font-black text-yellow-400 uppercase tracking-tight">${friend.username}</h4>
@@ -351,7 +376,7 @@
                     <div class="liquid-glass p-6 border-yellow-400/30 bg-gradient-to-br from-yellow-400/10 to-transparent">
                         <h3 class="text-[10px] font-black text-yellow-400 mb-3 uppercase italic">Твоя метка (СВЯЗЬ ID)</h3>
                         <div class="flex items-center justify-between bg-black/40 p-4 rounded-2xl border border-white/5">
-                            <span class="font-mono text-xl font-black tracking-widest">${state.currentUserData?.connectionId || '...'}</span>
+                            <span class="font-mono text-xl font-black tracking-widest">${state.currentUserData?.connectionId || 'НЕТ СВЯЗИ'}</span>
                             <button onclick="copyId()" class="bg-yellow-400 text-black px-4 py-2 rounded-xl text-[10px] font-black uppercase">Копия</button>
                         </div>
                     </div>
@@ -384,11 +409,11 @@
                     <div class="w-full space-y-6">
                         <div class="space-y-2">
                             <label class="text-[10px] uppercase font-black opacity-40 ml-4 italic text-white">Твой Ник</label>
-                            <div class="w-full bg-white/5 border border-white/10 rounded-[24px] p-5 font-black text-lg opacity-50 text-white">${state.currentUserData?.username}</div>
+                            <div class="w-full bg-white/5 border border-white/10 rounded-[24px] p-5 font-black text-lg opacity-50 text-white">${state.currentUserData?.username || 'GUEST'}</div>
                         </div>
                         <div class="space-y-2">
                             <label class="text-[10px] uppercase font-black opacity-40 ml-4 italic text-white">Статус в сети</label>
-                            <textarea id="profile-status" class="w-full bg-white/5 border border-white/10 rounded-[24px] p-5 yellow-glow text-sm font-bold resize-none h-24 text-white">${state.currentUserData?.status}</textarea>
+                            <textarea id="profile-status" class="w-full bg-white/5 border border-white/10 rounded-[24px] p-5 yellow-glow text-sm font-bold resize-none h-24 text-white">${state.currentUserData?.status || ''}</textarea>
                         </div>
                         <button onclick="updateProfile()" class="w-full bg-yellow-400 text-black font-black py-5 rounded-[24px] uppercase italic shadow-[0_10px_20px_rgba(255,215,0,0.2)]">Сохранить тюнинг</button>
                     </div>
@@ -411,6 +436,7 @@
         };
 
         window.updateProfile = async () => {
+            if (!state.user) return;
             const status = document.getElementById('profile-status').value;
             const avatar = state.tempAvatar || state.currentUserData.avatar;
             const update = { ...state.currentUserData, status, avatar };
@@ -438,7 +464,7 @@
                 <div class="flex flex-col h-full animate-in fade-in duration-300">
                     <div class="flex items-center gap-4 pb-5 mb-5 border-b border-white/10 shrink-0">
                         <button onclick="switchTab('chats')" class="text-white/30"><i class="fa-solid fa-arrow-left-long text-xl"></i></button>
-                        <span class="font-black text-yellow-400 uppercase italic">${friend?.username}</span>
+                        <span class="font-black text-yellow-400 uppercase italic">${friend?.username || 'ЧАТ'}</span>
                     </div>
                     <div class="flex-1 overflow-y-auto space-y-5 pr-2 custom-scrollbar flex flex-col" id="messages-container"></div>
                     <div class="pt-5 flex items-center gap-3 shrink-0">
@@ -449,7 +475,7 @@
                 </div>
             `;
 
-            if (!isAI) {
+            if (!isAI && state.user) {
                 const chatID = [state.user.uid, uid].sort().join('_');
                 const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'chats', chatID, 'messages'));
                 state.unsubscribeMessages = onSnapshot(q, (snap) => {
@@ -464,8 +490,8 @@
                         </div>
                     `).join('');
                     container.scrollTop = container.scrollHeight;
-                });
-            } else {
+                }, (err) => console.error("Snapshot error", err));
+            } else if (isAI) {
                 document.getElementById('messages-container').innerHTML = `<div class="message-liquid p-4 text-sm font-medium self-start text-white">Йо! Я СВЯЗНОЙ. Че надо?</div>`;
             }
         };
@@ -473,7 +499,7 @@
         window.sendMessage = async () => {
             const input = document.getElementById('msg-input');
             const text = input.value.trim();
-            if (!text || !state.activeChat) return;
+            if (!text || !state.activeChat || !state.user) return;
             input.value = '';
 
             if (state.activeChat === 'ai-bot') {
@@ -511,9 +537,17 @@
             }
         };
 
-        window.sendSticker = (s) => { document.getElementById('msg-input').value = s; window.sendMessage(); document.getElementById('sticker-panel').classList.add('hidden'); };
+        window.sendSticker = (s) => { 
+            const input = document.getElementById('msg-input');
+            if (input) {
+                input.value = s; 
+                window.sendMessage(); 
+            }
+            document.getElementById('sticker-panel').classList.add('hidden'); 
+        };
         
         window.copyId = () => {
+            if (!state.currentUserData?.connectionId) return;
             const t = document.createElement('input');
             t.value = state.currentUserData.connectionId;
             document.body.appendChild(t); t.select();
@@ -523,11 +557,14 @@
         };
 
         function showToast(m) {
+            const old = document.getElementById('custom-toast');
+            if (old) old.remove();
             const t = document.createElement('div');
-            t.className = "fixed bottom-32 left-1/2 -translate-x-1/2 bg-white text-black px-8 py-3 rounded-2xl font-black text-xs uppercase italic z-[2000] shadow-xl";
+            t.id = 'custom-toast';
+            t.className = "fixed bottom-32 left-1/2 -translate-x-1/2 bg-white text-black px-8 py-3 rounded-2xl font-black text-xs uppercase italic z-[2000] shadow-xl animate-bounce";
             t.innerText = m;
             document.body.appendChild(t);
-            setTimeout(() => t.remove(), 2000);
+            setTimeout(() => t.remove(), 2500);
         }
     </script>
 </body>
