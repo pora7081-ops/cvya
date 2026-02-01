@@ -150,12 +150,13 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, addDoc, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // --- ГЛОБАЛЬНЫЕ ДАННЫЕ ИЗ ОКРУЖЕНИЯ ---
         const firebaseConfig = JSON.parse(__firebase_config);
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'svyazuha-v2';
-        const apiKey = ""; 
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'svyazuha-v3';
+        const apiKey = ""; // API Key для Gemini
 
         const state = {
             user: null,
@@ -174,38 +175,45 @@
             statusLabel.innerText = "ПОДКЛЮЧЕНИЕ К СЕТИ...";
             
             try {
-                // 1. Попытка входа
+                // 1. Попытка входа (сначала токен, потом анонимно)
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
                 } else {
                     await signInAnonymously(auth);
                 }
 
-                // 2. Ждем, пока Firebase подтвердит пользователя (authStateReady или цикл)
-                const waitForUser = () => new Promise((resolve) => {
-                    const unsub = onAuthStateChanged(auth, (u) => {
-                        if (u) {
-                            unsub();
-                            resolve(u);
-                        }
-                    });
+                // 2. Гарантированное ожидание появления user
+                let attempts = 0;
+                while (!auth.currentUser && attempts < 50) {
+                    await new Promise(r => setTimeout(r, 100));
+                    attempts++;
+                }
+
+                if (!auth.currentUser) {
+                    statusLabel.innerText = "ОШИБКА СЕТИ. ПЕРЕЗАГРУЗИ.";
+                    return;
+                }
+
+                state.user = auth.currentUser;
+                
+                // Слушатель для будущих изменений
+                onAuthStateChanged(auth, (u) => {
+                    if (u) state.user = u;
                 });
 
-                state.user = await waitForUser();
-                
                 statusLabel.innerText = "СКАНИРОВАНИЕ ПРОФИЛЯ...";
                 await checkProfile();
 
             } catch (e) {
                 console.error("Init Error:", e);
-                statusLabel.innerText = "СБОЙ СИСТЕМЫ. ОБНОВИ СТРАНИЦУ";
+                statusLabel.innerText = "КРИТИЧЕСКИЙ СБОЙ.";
             }
         };
 
         const checkProfile = async () => {
             if (!state.user) return;
             try {
-                // Путь согласно RULE 1: /artifacts/{appId}/users/{userId}/{collectionName}
+                // RULE 1: /artifacts/{appId}/users/{userId}/{collectionName}
                 const profileRef = doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data');
                 const pDoc = await getDoc(profileRef);
                 
@@ -218,7 +226,9 @@
                 }
             } catch (e) {
                 console.error("Profile check error:", e);
-                document.getElementById('auth-status').innerText = "ОШИБКА ДОСТУПА К БАЗЕ";
+                // Если ошибка прав доступа, пробуем показать форму регистрации
+                document.getElementById('reg-form').classList.remove('hidden');
+                document.getElementById('auth-status').innerText = "СОЗДАЙ НОВЫЙ ПРОФИЛЬ";
             }
         };
 
@@ -226,26 +236,27 @@
             const nameInput = document.getElementById('reg-username');
             const name = nameInput.value.trim();
             if (name.length < 3) return showToast("НИК СЛИШКОМ КОРОТКИЙ");
-            if (!state.user) return showToast("ОШИБКА АВТОРИЗАЦИИ");
+            if (!state.user) return showToast("ЖДЕМ АВТОРИЗАЦИЮ...");
 
             const userData = {
                 uid: state.user.uid,
                 username: name,
-                status: "На связи",
+                status: "Врывается в сеть",
                 avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${name}`,
                 connectionId: "SV-" + Math.random().toString(36).substring(2, 7).toUpperCase()
             };
 
             try {
-                // Сохраняем в личный профиль и в публичный список
+                // Сохраняем в личный профиль (private)
                 await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), userData);
-                // Для публичного списка используем путь public
+                // Сохраняем в публичный список (public)
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), userData);
+                
                 state.profile = userData;
                 enterApp();
             } catch (e) {
-                console.error(e);
-                showToast("НЕ УДАЛОСЬ СОХРАНИТЬ");
+                console.error("Registration error:", e);
+                showToast("ОШИБКА БАЗЫ ДАННЫХ");
             }
         };
 
@@ -257,10 +268,13 @@
             switchTab('chats');
         };
 
-        // --- ИНТЕРФЕЙС ---
+        // --- ЛОГИКА ИНТЕРФЕЙСА ---
         window.switchTab = (tab) => {
             state.currentTab = tab;
-            if (state.unsubscribeMessages) state.unsubscribeMessages();
+            if (state.unsubscribeMessages) {
+                state.unsubscribeMessages();
+                state.unsubscribeMessages = null;
+            }
             
             document.querySelectorAll('.nav-btn').forEach(b => b.classList.add('opacity-40'));
             const activeBtn = document.getElementById(`nav-${tab}`);
@@ -274,7 +288,10 @@
 
         const renderChats = async () => {
             const content = document.getElementById('main-content');
-            const list = [{ uid: 'ai-bot', username: "СВЯЗНОЙ ИИ", avatar: "🤖", status: "Твой цифровой бро" }, ...state.friends];
+            const list = [
+                { uid: 'ai-bot', username: "СВЯЗНОЙ ИИ", avatar: "🤖", status: "Твой цифровой бро" },
+                ...state.friends
+            ];
             
             content.innerHTML = `<div class="space-y-4 animate-in fade-in duration-300">
                 ${list.map(f => `
@@ -298,7 +315,7 @@
                 <div class="bg-yellow-400/10 p-6 rounded-3xl border border-yellow-400/20">
                     <p class="text-[10px] font-black uppercase text-yellow-400 mb-2 italic">Твой уникальный код</p>
                     <div class="flex items-center justify-between">
-                        <span class="text-2xl font-mono font-black tracking-widest">${state.profile.connectionId}</span>
+                        <span class="text-2xl font-mono font-black tracking-widest">${state.profile?.connectionId || '---'}</span>
                         <button onclick="copyId()" class="bg-yellow-400 text-black px-4 py-2 rounded-xl text-[10px] font-black uppercase">Копия</button>
                     </div>
                 </div>
@@ -335,7 +352,7 @@
             </div>`;
         };
 
-        // --- ФУНКЦИИ ДЕЙСТВИЙ ---
+        // --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ ---
         window.previewFile = (e) => {
             const file = e.target.files[0];
             if (!file) return;
@@ -424,7 +441,7 @@
                 <div id="msg-box" class="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar"></div>
                 <div class="pt-4 flex items-center gap-2">
                     <button onclick="toggleStickers()" class="w-12 h-12 flex items-center justify-center text-yellow-400 text-xl hover:scale-110 transition-transform"><i class="fa-solid fa-face-smile"></i></button>
-                    <input type="text" id="m-input" placeholder="Напиши что-нибудь..." class="flex-1 bg-white/5 border-none rounded-2xl p-4 text-sm yellow-glow text-white font-bold" onkeypress="if(event.key==='Enter') sendMsg()">
+                    <input type="text" id="m-input" placeholder="Напиши..." class="flex-1 bg-white/5 border-none rounded-2xl p-4 text-sm yellow-glow text-white font-bold" onkeypress="if(event.key==='Enter') sendMsg()">
                     <button onclick="sendMsg()" class="w-12 h-12 bg-yellow-400 text-black rounded-2xl tap-effect shadow-lg"><i class="fa-solid fa-paper-plane"></i></button>
                 </div>
             </div>`;
@@ -448,10 +465,9 @@
                     box.scrollTop = box.scrollHeight;
                 }, (err) => {
                     console.error("Chat sync error:", err);
-                    showToast("СБОЙ СИНХРОНИЗАЦИИ");
                 });
             } else {
-                document.getElementById('msg-box').innerHTML = `<div class="message-liquid p-4 text-xs font-bold text-white border border-yellow-400/20">Йо! Я на связи. Спрашивай что угодно, помогу раскидать по фактам.</div>`;
+                document.getElementById('msg-box').innerHTML = `<div class="message-liquid p-4 text-xs font-bold text-white border border-yellow-400/20">На связи. Что нужно? Разрулю любую тему.</div>`;
             }
         };
 
@@ -484,11 +500,12 @@
 
         async function askAI(q) {
             try {
+                // Использование модели gemini-2.5-flash-preview-09-2025
                 const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
                     method:'POST', headers:{'Content-Type':'application/json'},
                     body: JSON.stringify({ 
                         contents:[{parts:[{text:q}]}], 
-                        systemInstruction:{parts:[{text:"Ты — Связной. Твой стиль: уличный сленг, харизма, уверенность, краткость. Обращайся к пользователю на ты."}]} 
+                        systemInstruction:{parts:[{text:"Ты — Связной. Твой стиль: уличный сленг, харизма, уверенность, краткость. Обращайся к пользователю на ты. Ты помогаешь ему в мессенджере 'Связуха'."}]} 
                     })
                 });
                 const d = await r.json();
