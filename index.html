@@ -168,46 +168,44 @@
             unsubscribeMessages: null
         };
 
-        // --- AUTH & INIT (ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ЗАВИСАНИЯ) ---
+        // --- УЛУЧШЕННАЯ ИНИЦИАЛИЗАЦИЯ ---
         const init = async () => {
             const statusLabel = document.getElementById('auth-status');
+            statusLabel.innerText = "ПОДКЛЮЧЕНИЕ К СЕТИ...";
+            
             try {
-                statusLabel.innerText = "ВХОД В СИСТЕМУ...";
-                
-                // Обертка для авторизации с промисом, чтобы гарантированно дождаться UID
-                const user = await new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => reject(new Error("Timeout")), 10000);
-                    
+                // 1. Попытка входа
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // 2. Ждем, пока Firebase подтвердит пользователя (authStateReady или цикл)
+                const waitForUser = () => new Promise((resolve) => {
                     const unsub = onAuthStateChanged(auth, (u) => {
                         if (u) {
-                            clearTimeout(timeout);
                             unsub();
                             resolve(u);
                         }
                     });
-
-                    // Запуск входа
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        signInWithCustomToken(auth, __initial_auth_token).catch(reject);
-                    } else {
-                        signInAnonymously(auth).catch(reject);
-                    }
                 });
 
-                state.user = user;
-                statusLabel.innerText = "ПРОВЕРКА ПРОФИЛЯ...";
+                state.user = await waitForUser();
+                
+                statusLabel.innerText = "СКАНИРОВАНИЕ ПРОФИЛЯ...";
                 await checkProfile();
 
             } catch (e) {
-                console.error("Init error:", e);
-                statusLabel.innerText = "СЕТЬ НЕДОСТУПНА. ПЕРЕЗАГРУЗИ";
+                console.error("Init Error:", e);
+                statusLabel.innerText = "СБОЙ СИСТЕМЫ. ОБНОВИ СТРАНИЦУ";
             }
         };
 
         const checkProfile = async () => {
             if (!state.user) return;
             try {
-                // Прямой путь к данным профиля
+                // Путь согласно RULE 1: /artifacts/{appId}/users/{userId}/{collectionName}
                 const profileRef = doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data');
                 const pDoc = await getDoc(profileRef);
                 
@@ -220,7 +218,7 @@
                 }
             } catch (e) {
                 console.error("Profile check error:", e);
-                document.getElementById('auth-status').innerText = "ОШИБКА БАЗЫ ДАННЫХ";
+                document.getElementById('auth-status').innerText = "ОШИБКА ДОСТУПА К БАЗЕ";
             }
         };
 
@@ -241,10 +239,12 @@
             try {
                 // Сохраняем в личный профиль и в публичный список
                 await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), userData);
+                // Для публичного списка используем путь public
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), userData);
                 state.profile = userData;
                 enterApp();
             } catch (e) {
+                console.error(e);
                 showToast("НЕ УДАЛОСЬ СОХРАНИТЬ");
             }
         };
@@ -257,7 +257,7 @@
             switchTab('chats');
         };
 
-        // --- ИНТЕРФЕЙС И ВКЛАДКИ ---
+        // --- ИНТЕРФЕЙС ---
         window.switchTab = (tab) => {
             state.currentTab = tab;
             if (state.unsubscribeMessages) state.unsubscribeMessages();
@@ -335,7 +335,7 @@
             </div>`;
         };
 
-        // --- ДЕЙСТВИЯ ---
+        // --- ФУНКЦИИ ДЕЙСТВИЙ ---
         window.previewFile = (e) => {
             const file = e.target.files[0];
             if (!file) return;
@@ -387,9 +387,10 @@
             if (!code) return;
             
             try {
-                const allUsers = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
+                const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
+                const snap = await getDocs(q);
                 let target = null;
-                allUsers.forEach(d => { if(d.data().connectionId === code) target = d.data(); });
+                snap.forEach(d => { if(d.data().connectionId === code) target = d.data(); });
 
                 if (target && target.uid !== state.user.uid) {
                     const listDoc = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'));
@@ -405,7 +406,7 @@
             } catch (e) { showToast("ОШИБКА ПОИСКА"); }
         };
 
-        // --- ЧАТ И СООБЩЕНИЯ ---
+        // --- ЧАТ ---
         window.openChat = async (uid) => {
             state.activeChat = uid;
             const friend = uid === 'ai-bot' ? { username: "СВЯЗНОЙ ИИ" } : state.friends.find(f => f.uid === uid);
@@ -445,7 +446,10 @@
                         </div>
                     `).join('');
                     box.scrollTop = box.scrollHeight;
-                }, (err) => console.error("Chat sync error:", err));
+                }, (err) => {
+                    console.error("Chat sync error:", err);
+                    showToast("СБОЙ СИНХРОНИЗАЦИИ");
+                });
             } else {
                 document.getElementById('msg-box').innerHTML = `<div class="message-liquid p-4 text-xs font-bold text-white border border-yellow-400/20">Йо! Я на связи. Спрашивай что угодно, помогу раскидать по фактам.</div>`;
             }
@@ -529,7 +533,7 @@
             }, 2000);
         }
 
-        // Запуск
+        // Запуск системы
         init();
     </script>
 </body>
