@@ -87,15 +87,22 @@
         input[type="file"] { display: none; }
         
         .error-btn {
-            background: rgba(255, 0, 0, 0.2);
-            border: 1px solid rgba(255, 0, 0, 0.5);
-            color: #ff5555;
-            padding: 10px 20px;
-            border-radius: 12px;
-            margin-top: 10px;
-            font-size: 10px;
-            font-weight: bold;
+            background: rgba(255, 215, 0, 0.1);
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            padding: 12px 24px;
+            border-radius: 16px;
+            margin-top: 20px;
+            font-size: 12px;
+            font-weight: 900;
             text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .error-btn:hover {
+            background: var(--accent);
+            color: black;
         }
     </style>
 </head>
@@ -107,8 +114,8 @@
             <div class="mb-10 text-center">
                 <div class="w-20 h-20 bg-yellow-400 rounded-[30px] flex items-center justify-center text-black font-black text-4xl rotate-6 mx-auto mb-4 shadow-[0_0_30px_rgba(255,215,0,0.6)]">С</div>
                 <h1 class="text-3xl font-black uppercase tracking-[0.2em] italic">Связуха</h1>
-                <p id="auth-status" class="text-yellow-400 text-[10px] font-bold uppercase tracking-widest mt-2">Инициализация протоколов...</p>
-                <div id="auth-retry-box"></div>
+                <p id="auth-status" class="text-yellow-400 text-[10px] font-bold uppercase tracking-widest mt-2">Канал прогружается...</p>
+                <div id="auth-retry-box" class="flex flex-col items-center"></div>
             </div>
 
             <div id="reg-form" class="w-full space-y-6 hidden">
@@ -169,7 +176,7 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'svyazuha-v4';
-        const apiKey = ""; // API Key для Gemini
+        const apiKey = ""; 
 
         const state = {
             user: null,
@@ -179,47 +186,58 @@
             activeChat: null,
             tempAvatar: null,
             stickers: ["💀", "💸", "💊", "🔫", "🛰️", "🛸", "🖤", "😈", "🦾", "🌪️", "🌊", "🎰"],
-            unsubscribeMessages: null
+            unsubscribeMessages: null,
+            isAuthAttempted: false
         };
 
-        // --- ИНИЦИАЛИЗАЦИЯ (ФИНАЛЬНЫЙ ФИКС ЗАВИСАНИЯ) ---
-        const init = async () => {
+        // --- ИНИЦИАЛИЗАЦИЯ (ФИКС ДЛЯ VERCEL) ---
+        const init = () => {
             const statusLabel = document.getElementById('auth-status');
             const retryBox = document.getElementById('auth-retry-box');
-            statusLabel.innerText = "ПОДКЛЮЧЕНИЕ...";
             
-            // Тайм-аут на случай "вечного" ожидания от Firebase
-            const safetyTimeout = setTimeout(() => {
+            // Таймер "паники" для Vercel/External domains
+            const fallbackTimer = setTimeout(() => {
                 if (!state.user) {
-                    statusLabel.innerText = "СЕТЬ ТОРМОЗИТ...";
-                    retryBox.innerHTML = `<button onclick="location.reload()" class="error-btn">Переподключиться</button>`;
+                    statusLabel.innerText = "СЕТЬ ТОРМОЗИТ (VERCEL)";
+                    retryBox.innerHTML = `
+                        <button onclick="forceAuth()" class="error-btn">Войти принудительно</button>
+                        <p class="text-[8px] opacity-30 mt-2 uppercase font-bold">Нажми, если висит больше 5 сек</p>
+                    `;
                 }
-            }, 5000);
+            }, 4000);
 
-            onAuthStateChanged(auth, async (user) => {
+            onAuthStateChanged(auth, (user) => {
                 if (user) {
-                    clearTimeout(safetyTimeout);
+                    clearTimeout(fallbackTimer);
                     state.user = user;
-                    statusLabel.innerText = "ПРОВЕРКА ПРОФИЛЯ...";
-                    await checkProfile();
-                } else {
-                    try {
-                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                            await signInWithCustomToken(auth, __initial_auth_token);
-                        } else {
-                            await signInAnonymously(auth);
-                        }
-                    } catch (err) {
-                        console.error("Auth Error:", err);
-                        statusLabel.innerText = "ОШИБКА АВТОРИЗАЦИИ";
-                        retryBox.innerHTML = `<button onclick="location.reload()" class="error-btn">Повторить</button>`;
-                    }
+                    statusLabel.innerText = "ПРОВЕРКА БАЗЫ...";
+                    checkProfile();
+                } else if (!state.isAuthAttempted) {
+                    state.isAuthAttempted = true;
+                    attemptLogin();
                 }
             });
         };
 
+        window.forceAuth = () => {
+            location.reload();
+        };
+
+        async function attemptLogin() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) {
+                console.error("Auth Error:", err);
+                document.getElementById('auth-status').innerText = "ОШИБКА ДОСТУПА";
+                document.getElementById('auth-retry-box').innerHTML = `<button onclick="location.reload()" class="error-btn">Повторить попытку</button>`;
+            }
+        }
+
         const checkProfile = async () => {
-            if (!state.user) return;
             try {
                 const profileRef = doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data');
                 const pDoc = await getDoc(profileRef);
@@ -231,15 +249,13 @@
                     showRegForm();
                 }
             } catch (e) {
-                console.error("Profile check error:", e);
-                // Если не удалось загрузить профиль (например, из-за прав), 
-                // даем возможность создать новый или перезайти
+                console.warn("Profile fetch error, showing reg form:", e);
                 showRegForm();
             }
         };
 
         const showRegForm = () => {
-            document.getElementById('auth-status').innerText = "ВХОД ВПЕРВЫЕ";
+            document.getElementById('auth-status').innerText = "ДОБРО ПОЖАЛОВАТЬ";
             document.getElementById('reg-form').classList.remove('hidden');
             document.getElementById('auth-retry-box').innerHTML = "";
         };
@@ -248,12 +264,12 @@
             const nameInput = document.getElementById('reg-username');
             const name = nameInput.value.trim();
             if (name.length < 3) return showToast("НИК ОТ 3 СИМВОЛОВ");
-            if (!state.user) return showToast("НЕТ СИГНАЛА");
+            if (!state.user) return showToast("ОЖИДАНИЕ СЕТИ...");
 
             const userData = {
                 uid: state.user.uid,
                 username: name,
-                status: "В сети Связухи",
+                status: "Новый в Связухе",
                 avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${name}`,
                 connectionId: "SV-" + Math.random().toString(36).substring(2, 8).toUpperCase()
             };
@@ -264,7 +280,6 @@
                 state.profile = userData;
                 enterApp();
             } catch (e) {
-                console.error("Reg error:", e);
                 showToast("ОШИБКА СОХРАНЕНИЯ");
             }
         };
@@ -277,7 +292,7 @@
             switchTab('chats');
         };
 
-        // --- ЛОГИКА ВКЛАДОК ---
+        // --- ВКЛАДКИ ---
         window.switchTab = (tab) => {
             state.currentTab = tab;
             if (state.unsubscribeMessages) {
@@ -298,11 +313,11 @@
         const renderChats = async () => {
             const content = document.getElementById('main-content');
             const list = [
-                { uid: 'ai-bot', username: "СВЯЗНОЙ ИИ", avatar: "🤖", status: "Цифровой разум" },
+                { uid: 'ai-bot', username: "СВЯЗНОЙ ИИ", avatar: "🤖", status: "Твой цифровой бро" },
                 ...state.friends
             ];
             
-            content.innerHTML = `<div class="space-y-4 animate-in fade-in">
+            content.innerHTML = `<div class="space-y-4 animate-in fade-in duration-300">
                 ${list.map(f => `
                     <div onclick="openChat('${f.uid}')" class="flex items-center gap-4 p-4 hover:bg-yellow-400/5 rounded-2xl cursor-pointer border border-transparent hover:border-white/10 active:scale-95 transition-all">
                         <div class="w-14 h-14 rounded-xl bg-yellow-400/10 overflow-hidden flex items-center justify-center text-2xl border border-yellow-400/20">
@@ -319,16 +334,16 @@
 
         const renderFriends = () => {
             const content = document.getElementById('main-content');
-            content.innerHTML = `<div class="space-y-8 animate-in slide-in-from-bottom-4">
+            content.innerHTML = `<div class="space-y-8 animate-in slide-in-from-bottom-4 duration-300">
                 <div class="bg-yellow-400/10 p-6 rounded-3xl border border-yellow-400/20">
-                    <p class="text-[10px] font-black uppercase text-yellow-400 mb-2 italic">Твой код связи</p>
+                    <p class="text-[10px] font-black uppercase text-yellow-400 mb-2 italic">Код твоего канала</p>
                     <div class="flex items-center justify-between">
-                        <span class="text-2xl font-mono font-black tracking-widest">${state.profile?.connectionId || '---'}</span>
-                        <button onclick="copyId()" class="bg-yellow-400 text-black px-4 py-2 rounded-xl text-[10px] font-black uppercase">Копия</button>
+                        <span class="text-2xl font-mono font-black tracking-widest text-white">${state.profile?.connectionId || '---'}</span>
+                        <button onclick="copyId()" class="bg-yellow-400 text-black px-4 py-2 rounded-xl text-[10px] font-black uppercase tap-effect">Копия</button>
                     </div>
                 </div>
                 <div class="space-y-2">
-                    <label class="text-[10px] font-black uppercase opacity-40 ml-4 italic">Найти бро</label>
+                    <label class="text-[10px] font-black uppercase opacity-40 ml-4 italic">Найти бро по коду</label>
                     <div class="flex gap-2">
                         <input type="text" id="friend-input" placeholder="SV-XXXXXX" class="flex-1 bg-white/5 border border-white/10 rounded-2xl p-4 yellow-glow uppercase font-black text-white">
                         <button onclick="addFriend()" class="bg-yellow-400 text-black px-6 rounded-2xl tap-effect"><i class="fa-solid fa-plus"></i></button>
@@ -340,7 +355,7 @@
         const renderProfile = () => {
             const content = document.getElementById('main-content');
             const avatar = state.tempAvatar || state.profile.avatar;
-            content.innerHTML = `<div class="flex flex-col items-center pt-6 space-y-8 animate-in zoom-in-95">
+            content.innerHTML = `<div class="flex flex-col items-center pt-6 space-y-8 animate-in zoom-in-95 duration-300">
                 <div class="relative">
                     <div class="w-40 h-40 rounded-[40px] border-4 border-yellow-400/30 p-2 rotate-3 overflow-hidden bg-black shadow-2xl">
                         <img id="prev-img" src="${avatar}" class="w-full h-full object-cover rounded-[30px] -rotate-3">
@@ -352,10 +367,10 @@
                 </div>
                 <div class="w-full space-y-4">
                     <div class="space-y-1">
-                        <label class="text-[9px] uppercase font-black opacity-30 ml-4 italic">Статус в сети</label>
+                        <label class="text-[9px] uppercase font-black opacity-30 ml-4 italic">Твой вайб (статус)</label>
                         <textarea id="p-status" class="w-full bg-white/5 border border-white/10 rounded-2xl p-4 yellow-glow h-20 resize-none text-white font-bold">${state.profile.status}</textarea>
                     </div>
-                    <button onclick="saveProfile()" class="w-full bg-yellow-400 text-black font-black py-5 rounded-2xl uppercase italic shadow-lg tap-effect">Сохранить</button>
+                    <button onclick="saveProfile()" class="w-full bg-yellow-400 text-black font-black py-5 rounded-2xl uppercase italic shadow-lg tap-effect">Обновить базу</button>
                 </div>
             </div>`;
         };
@@ -383,9 +398,9 @@
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), updated);
                 state.profile = updated;
                 state.tempAvatar = null;
-                showToast("БАЗА ОБНОВЛЕНА");
+                showToast("ПРОФИЛЬ ОБНОВЛЕН");
             } catch (e) {
-                showToast("ОШИБКА ДОСТУПА");
+                showToast("ОШИБКА СОХРАНЕНИЯ");
             }
         };
 
@@ -424,32 +439,32 @@
                         list.push(target.uid);
                         await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'), { list });
                         await loadFriends();
-                        showToast("БРО ДОБАВЛЕН");
+                        showToast("БРО В ГЭНГЕ");
                         input.value = "";
                     } else showToast("УЖЕ В СПИСКЕ");
                 } else showToast("КОД НЕ НАЙДЕН");
-            } catch (e) { showToast("СЕТЕВАЯ ОШИБКА"); }
+            } catch (e) { showToast("ОШИБКА ПОИСКА"); }
         };
 
-        // --- ЧАТ И МЕССЕДЖИНГ ---
+        // --- МЕССЕДЖИНГ ---
         window.openChat = async (uid) => {
             state.activeChat = uid;
             const friend = uid === 'ai-bot' ? { username: "СВЯЗНОЙ ИИ" } : state.friends.find(f => f.uid === uid);
             if (!friend) return;
 
             const content = document.getElementById('main-content');
-            content.innerHTML = `<div class="flex flex-col h-full animate-in fade-in">
+            content.innerHTML = `<div class="flex flex-col h-full animate-in fade-in duration-300">
                 <div class="flex items-center gap-4 mb-4 pb-4 border-b border-white/10">
-                    <button onclick="switchTab('chats')" class="w-10 h-10 flex items-center justify-center bg-white/5 rounded-xl"><i class="fa-solid fa-arrow-left"></i></button>
+                    <button onclick="switchTab('chats')" class="w-10 h-10 flex items-center justify-center bg-white/5 rounded-xl tap-effect"><i class="fa-solid fa-arrow-left"></i></button>
                     <div class="flex flex-col">
                         <span class="font-black text-yellow-400 uppercase italic leading-none">${friend.username}</span>
-                        <span class="text-[8px] opacity-40 font-bold uppercase mt-1">Шифрованный канал</span>
+                        <span class="text-[8px] opacity-40 font-bold uppercase mt-1">Защищенный канал</span>
                     </div>
                 </div>
                 <div id="msg-box" class="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar"></div>
                 <div class="pt-4 flex items-center gap-2">
-                    <button onclick="toggleStickers()" class="w-12 h-12 flex items-center justify-center text-yellow-400 text-xl"><i class="fa-solid fa-face-smile"></i></button>
-                    <input type="text" id="m-input" placeholder="Голос улиц..." class="flex-1 bg-white/5 border-none rounded-2xl p-4 text-sm text-white font-bold" onkeypress="if(event.key==='Enter') sendMsg()">
+                    <button onclick="toggleStickers()" class="w-12 h-12 flex items-center justify-center text-yellow-400 text-xl tap-effect"><i class="fa-solid fa-face-smile"></i></button>
+                    <input type="text" id="m-input" placeholder="Пиши ровно..." class="flex-1 bg-white/5 border-none rounded-2xl p-4 text-sm text-white font-bold" onkeypress="if(event.key==='Enter') sendMsg()">
                     <button onclick="sendMsg()" class="w-12 h-12 bg-yellow-400 text-black rounded-2xl tap-effect"><i class="fa-solid fa-paper-plane"></i></button>
                 </div>
             </div>`;
@@ -471,9 +486,9 @@
                         </div>
                     `).join('');
                     box.scrollTop = box.scrollHeight;
-                }, (err) => console.error("Chat sync error:", err));
+                }, (err) => console.error("Chat error:", err));
             } else {
-                document.getElementById('msg-box').innerHTML = `<div class="message-liquid p-4 text-xs font-bold text-white border border-yellow-400/20">Внимательно слушаю. Что на уме?</div>`;
+                document.getElementById('msg-box').innerHTML = `<div class="message-liquid p-4 text-xs font-bold text-white border border-yellow-400/20 bg-yellow-400/5">Я в сети. Что обсудим сегодня?</div>`;
             }
         };
 
@@ -499,7 +514,7 @@
                     await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'chats', chatID, 'messages'), {
                         text, from: state.user.uid, at: serverTimestamp()
                     });
-                } catch (e) { showToast("ОШИБКА СЕТИ"); }
+                } catch (e) { showToast("СБОЙ ОТПРАВКИ"); }
             }
         };
 
@@ -509,12 +524,12 @@
                     method:'POST', headers:{'Content-Type':'application/json'},
                     body: JSON.stringify({ 
                         contents:[{parts:[{text:q}]}], 
-                        systemInstruction:{parts:[{text:"Ты — Связной. Твой стиль: уличный сленг, харизма, уверенность. Ты помогаешь юзеру в мессенджере 'Связуха'."}]} 
+                        systemInstruction:{parts:[{text:"Ты — Связной. Твой стиль: харизматичный уличный бро, уверенный, используешь сленг. Ты — мозг мессенджера 'Связуха'."}]} 
                     })
                 });
                 const d = await r.json();
-                return d.candidates?.[0]?.content?.parts?.[0]?.text || "Глюк в системе, бро.";
-            } catch { return "Связь с ИИ оборвана."; }
+                return d.candidates?.[0]?.content?.parts?.[0]?.text || "Тут помехи на линии, бро.";
+            } catch { return "ИИ вне зоны доступа."; }
         }
 
         window.toggleStickers = () => {
@@ -538,7 +553,7 @@
         window.copyId = () => { 
             if (state.profile) {
                 navigator.clipboard.writeText(state.profile.connectionId); 
-                showToast("ID В БУФЕРЕ"); 
+                showToast("КОД СКОПИРОВАН"); 
             }
         };
 
