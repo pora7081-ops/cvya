@@ -85,6 +85,18 @@
         }
 
         input[type="file"] { display: none; }
+        
+        .error-btn {
+            background: rgba(255, 0, 0, 0.2);
+            border: 1px solid rgba(255, 0, 0, 0.5);
+            color: #ff5555;
+            padding: 10px 20px;
+            border-radius: 12px;
+            margin-top: 10px;
+            font-size: 10px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
     </style>
 </head>
 <body>
@@ -96,6 +108,7 @@
                 <div class="w-20 h-20 bg-yellow-400 rounded-[30px] flex items-center justify-center text-black font-black text-4xl rotate-6 mx-auto mb-4 shadow-[0_0_30px_rgba(255,215,0,0.6)]">С</div>
                 <h1 class="text-3xl font-black uppercase tracking-[0.2em] italic">Связуха</h1>
                 <p id="auth-status" class="text-yellow-400 text-[10px] font-bold uppercase tracking-widest mt-2">Инициализация протоколов...</p>
+                <div id="auth-retry-box"></div>
             </div>
 
             <div id="reg-form" class="w-full space-y-6 hidden">
@@ -150,7 +163,7 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, addDoc, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // --- ГЛОБАЛЬНЫЕ ДАННЫЕ ИЗ ОКРУЖЕНИЯ ---
+        // --- ГЛОБАЛЬНЫЕ ДАННЫЕ ---
         const firebaseConfig = JSON.parse(__firebase_config);
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
@@ -169,61 +182,45 @@
             unsubscribeMessages: null
         };
 
-        // --- ИНИЦИАЛИЗАЦИЯ (ИСПРАВЛЕННАЯ) ---
+        // --- ИНИЦИАЛИЗАЦИЯ (ФИНАЛЬНЫЙ ФИКС ЗАВИСАНИЯ) ---
         const init = async () => {
             const statusLabel = document.getElementById('auth-status');
-            statusLabel.innerText = "УСТАНОВКА СВЯЗИ...";
+            const retryBox = document.getElementById('auth-retry-box');
+            statusLabel.innerText = "ПОДКЛЮЧЕНИЕ...";
             
-            try {
-                // 1. Ожидаем авторизацию
-                await new Promise((resolve, reject) => {
-                    const unsubscribe = onAuthStateChanged(auth, (user) => {
-                        unsubscribe();
-                        if (user) {
-                            state.user = user;
-                            resolve(user);
-                        } else {
-                            // Если юзера нет, пробуем войти
-                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                                signInWithCustomToken(auth, __initial_auth_token).catch(reject);
-                            } else {
-                                signInAnonymously(auth).catch(reject);
-                            }
-                        }
-                    });
-                    
-                    // Дополнительный таймаут на случай зависания onAuthStateChanged
-                    setTimeout(() => {
-                        if (auth.currentUser) {
-                            state.user = auth.currentUser;
-                            resolve(auth.currentUser);
-                        }
-                    }, 2000);
-                });
-
-                // Ждем пока Firebase обновит auth.currentUser окончательно
-                let attempts = 0;
-                while (!auth.currentUser && attempts < 20) {
-                    await new Promise(r => setTimeout(r, 200));
-                    attempts++;
+            // Тайм-аут на случай "вечного" ожидания от Firebase
+            const safetyTimeout = setTimeout(() => {
+                if (!state.user) {
+                    statusLabel.innerText = "СЕТЬ ТОРМОЗИТ...";
+                    retryBox.innerHTML = `<button onclick="location.reload()" class="error-btn">Переподключиться</button>`;
                 }
+            }, 5000);
 
-                if (!auth.currentUser) throw new Error("Auth failed");
-                state.user = auth.currentUser;
-
-                statusLabel.innerText = "СКАНИРОВАНИЕ ПРОФИЛЯ...";
-                await checkProfile();
-
-            } catch (e) {
-                console.error("Init Error:", e);
-                statusLabel.innerText = "ОШИБКА ДОСТУПА. ПЕРЕЗАГРУЗИ.";
-            }
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    clearTimeout(safetyTimeout);
+                    state.user = user;
+                    statusLabel.innerText = "ПРОВЕРКА ПРОФИЛЯ...";
+                    await checkProfile();
+                } else {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (err) {
+                        console.error("Auth Error:", err);
+                        statusLabel.innerText = "ОШИБКА АВТОРИЗАЦИИ";
+                        retryBox.innerHTML = `<button onclick="location.reload()" class="error-btn">Повторить</button>`;
+                    }
+                }
+            });
         };
 
         const checkProfile = async () => {
             if (!state.user) return;
             try {
-                // RULE 1: /artifacts/{appId}/users/{userId}/profile/data
                 const profileRef = doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data');
                 const pDoc = await getDoc(profileRef);
                 
@@ -231,22 +228,27 @@
                     state.profile = pDoc.data();
                     enterApp();
                 } else {
-                    document.getElementById('auth-status').innerText = "ВХОД ВПЕРВЫЕ";
-                    document.getElementById('reg-form').classList.remove('hidden');
+                    showRegForm();
                 }
             } catch (e) {
                 console.error("Profile check error:", e);
-                // Если ошибка прав, скорее всего профиля просто нет, показываем регистрацию
-                document.getElementById('reg-form').classList.remove('hidden');
-                document.getElementById('auth-status').innerText = "СОЗДАЙ ПРОФИЛЬ";
+                // Если не удалось загрузить профиль (например, из-за прав), 
+                // даем возможность создать новый или перезайти
+                showRegForm();
             }
+        };
+
+        const showRegForm = () => {
+            document.getElementById('auth-status').innerText = "ВХОД ВПЕРВЫЕ";
+            document.getElementById('reg-form').classList.remove('hidden');
+            document.getElementById('auth-retry-box').innerHTML = "";
         };
 
         window.handleRegister = async () => {
             const nameInput = document.getElementById('reg-username');
             const name = nameInput.value.trim();
             if (name.length < 3) return showToast("НИК ОТ 3 СИМВОЛОВ");
-            if (!state.user) return showToast("СЕТЬ НЕ ГОТОВА");
+            if (!state.user) return showToast("НЕТ СИГНАЛА");
 
             const userData = {
                 uid: state.user.uid,
@@ -257,16 +259,13 @@
             };
 
             try {
-                // Сохраняем в личный раздел
                 await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), userData);
-                // Сохраняем в публичный реестр для поиска
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), userData);
-                
                 state.profile = userData;
                 enterApp();
             } catch (e) {
-                console.error("Registration error:", e);
-                showToast("СБОЙ ЗАПИСИ");
+                console.error("Reg error:", e);
+                showToast("ОШИБКА СОХРАНЕНИЯ");
             }
         };
 
