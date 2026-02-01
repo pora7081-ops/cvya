@@ -171,37 +171,60 @@
         // --- AUTH & INIT ---
         const init = async () => {
             try {
+                // Rule 3: Auth Before Queries
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
                 } else {
                     await signInAnonymously(auth);
                 }
 
-                onAuthStateChanged(auth, async (user) => {
-                    if (user) {
-                        state.user = user;
-                        await checkProfile();
-                    }
+                // Ждем изменения состояния авторизации один раз для инициализации
+                const user = await new Promise((resolve) => {
+                    const unsubscribe = onAuthStateChanged(auth, (u) => {
+                        unsubscribe();
+                        resolve(u);
+                    });
                 });
+
+                if (user) {
+                    state.user = user;
+                    await checkProfile();
+                    
+                    // Устанавливаем постоянный слушатель для обновления стейта
+                    onAuthStateChanged(auth, (u) => {
+                        state.user = u;
+                    });
+                } else {
+                    document.getElementById('auth-status').innerText = "ОШИБКА АВТОРИЗАЦИИ";
+                }
             } catch (e) {
+                console.error(e);
                 document.getElementById('auth-status').innerText = "ОШИБКА СЕТИ";
             }
         };
 
         const checkProfile = async () => {
-            const pDoc = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'));
-            if (pDoc.exists()) {
-                state.profile = pDoc.data();
-                enterApp();
-            } else {
-                document.getElementById('auth-status').innerText = "ЖДЕМ ТЕБЯ";
-                document.getElementById('reg-form').classList.remove('hidden');
+            if (!state.user) return;
+            try {
+                // Rule 1: Strict Paths
+                const pDoc = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'));
+                if (pDoc.exists()) {
+                    state.profile = pDoc.data();
+                    enterApp();
+                } else {
+                    document.getElementById('auth-status').innerText = "ЖДЕМ ТЕБЯ";
+                    document.getElementById('reg-form').classList.remove('hidden');
+                }
+            } catch (e) {
+                console.error(e);
+                document.getElementById('auth-status').innerText = "ОШИБКА ДОСТУПА";
             }
         };
 
         window.handleRegister = async () => {
             const name = document.getElementById('reg-username').value.trim();
             if (name.length < 3) return showToast("НИК КОРОТКИЙ");
+            if (!state.user) return showToast("НЕТ СЕТИ");
 
             const userData = {
                 uid: state.user.uid,
@@ -211,10 +234,14 @@
                 connectionId: "SV-" + Math.random().toString(36).substring(2, 7).toUpperCase()
             };
 
-            await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), userData);
-            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), userData);
-            state.profile = userData;
-            enterApp();
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), userData);
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), userData);
+                state.profile = userData;
+                enterApp();
+            } catch (e) {
+                showToast("ОШИБКА СОХРАНЕНИЯ");
+            }
         };
 
         const enterApp = () => {
@@ -231,7 +258,8 @@
             if (state.unsubscribeMessages) state.unsubscribeMessages();
             
             document.querySelectorAll('.nav-btn').forEach(b => b.classList.add('opacity-40'));
-            document.getElementById(`nav-${tab}`)?.classList.remove('opacity-40');
+            const activeBtn = document.getElementById(`nav-${tab}`);
+            if (activeBtn) activeBtn.classList.remove('opacity-40');
 
             if (tab === 'chats') renderChats();
             if (tab === 'friends') renderFriends();
@@ -307,22 +335,30 @@
             const reader = new FileReader();
             reader.onload = (res) => {
                 state.tempAvatar = res.target.result;
-                document.getElementById('prev-img').src = res.target.result;
+                const img = document.getElementById('prev-img');
+                if (img) img.src = res.target.result;
             };
             reader.readAsDataURL(file);
         };
 
         window.saveProfile = async () => {
-            const status = document.getElementById('p-status').value;
+            const statusInput = document.getElementById('p-status');
+            const status = statusInput ? statusInput.value : state.profile.status;
             const updated = { ...state.profile, status, avatar: state.tempAvatar || state.profile.avatar };
-            await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), updated);
-            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), updated);
-            state.profile = updated;
-            state.tempAvatar = null;
-            showToast("ГОТОВО!");
+            
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'profile', 'data'), updated);
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', state.user.uid), updated);
+                state.profile = updated;
+                state.tempAvatar = null;
+                showToast("ГОТОВО!");
+            } catch (e) {
+                showToast("ОШИБКА");
+            }
         };
 
         const loadFriends = async () => {
+            if (!state.user) return;
             const fSnap = await getDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'settings', 'friends'));
             if (fSnap.exists()) {
                 const list = fSnap.data().list || [];
@@ -337,7 +373,8 @@
         };
 
         window.addFriend = async () => {
-            const code = document.getElementById('friend-input').value.trim().toUpperCase();
+            const input = document.getElementById('friend-input');
+            const code = input ? input.value.trim().toUpperCase() : "";
             const allUsers = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
             let target = null;
             allUsers.forEach(d => { if(d.data().connectionId === code) target = d.data(); });
@@ -388,7 +425,7 @@
                         </div>
                     `).join('');
                     box.scrollTop = box.scrollHeight;
-                });
+                }, (err) => console.error("Snapshot error:", err));
             } else {
                 document.getElementById('msg-box').innerHTML = `<div class="message-liquid p-4 text-xs font-medium text-white">Йо! Я на связи. Спрашивай че хочешь.</div>`;
             }
@@ -396,6 +433,7 @@
 
         window.sendMsg = async () => {
             const input = document.getElementById('m-input');
+            if (!input) return;
             const text = input.value.trim();
             if (!text || !state.activeChat) return;
             input.value = '';
@@ -403,9 +441,12 @@
             if (state.activeChat === 'ai-bot') {
                 const box = document.getElementById('msg-box');
                 box.innerHTML += `<div class="message-liquid mine p-4 text-xs font-bold ml-auto text-white">${text}</div>`;
-                const reply = await askAI(text);
-                box.innerHTML += `<div class="message-liquid p-4 text-xs font-medium text-white border border-yellow-400/20">${reply}</div>`;
                 box.scrollTop = box.scrollHeight;
+                const reply = await askAI(text);
+                if (box) {
+                    box.innerHTML += `<div class="message-liquid p-4 text-xs font-medium text-white border border-yellow-400/20">${reply}</div>`;
+                    box.scrollTop = box.scrollHeight;
+                }
             } else {
                 const chatID = [state.user.uid, state.activeChat].sort().join('_');
                 await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'chats', chatID, 'messages'), {
@@ -427,14 +468,26 @@
 
         window.toggleStickers = () => {
             const p = document.getElementById('sticker-panel');
+            if (!p) return;
             p.classList.toggle('hidden');
             document.getElementById('sticker-grid').innerHTML = state.stickers.map(s => `
                 <div onclick="sendSticker('${s}')" class="text-3xl p-2 hover:bg-yellow-400/20 rounded-xl cursor-pointer text-center">${s}</div>
             `).join('');
         };
 
-        window.sendSticker = (s) => { document.getElementById('m-input').value = s; sendMsg(); toggleStickers(); };
-        window.copyId = () => { navigator.clipboard.writeText(state.profile.connectionId); showToast("КОПИЯ!"); };
+        window.sendSticker = (s) => { 
+            const input = document.getElementById('m-input');
+            if (input) input.value = s; 
+            sendMsg(); 
+            toggleStickers(); 
+        };
+
+        window.copyId = () => { 
+            if (state.profile) {
+                navigator.clipboard.writeText(state.profile.connectionId); 
+                showToast("КОПИЯ!"); 
+            }
+        };
 
         function showToast(m) {
             const t = document.createElement('div');
